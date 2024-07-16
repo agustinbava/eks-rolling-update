@@ -1,5 +1,6 @@
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from kubernetes.config.config_exception import ConfigException
 import os
 import subprocess
 import time
@@ -9,21 +10,33 @@ from eksrollup.config import app_config
 
 
 def ensure_config_loaded():
-
-    kube_config = os.getenv('KUBECONFIG')
-    if kube_config and os.path.isfile(kube_config):
-        try:
-            config.load_kube_config(context=app_config['K8S_CONTEXT'])
-        except config.ConfigException:
-            raise Exception("Could not configure kubernetes python client")
-    else:
-        try:
-            config.load_incluster_config()
-        except config.ConfigException:
+    kube_config = os.getenv('KUBECONFIG', '~/.kube/config')
+    kube_config = os.path.expanduser(kube_config)
+    
+    def load_kube_config_file(config_file, context):
+        if os.path.isfile(config_file):
+            logger.info(f"Loading kubeconfig from {config_file}")
             try:
-                config.load_kube_config(context=app_config['K8S_CONTEXT'])
-            except config.ConfigException:
-                raise Exception("Could not configure kubernetes python client")
+                config.load_kube_config(config_file=config_file, context=context)
+                logger.info(f"Kubernetes context {context} loaded successfully from {config_file}")
+            except ConfigException as e:
+                logger.warning(f"Could not configure kubernetes python client with the specified context {context} from {config_file}: {e}")
+                raise Exception("Could not configure kubernetes python client with the specified context")
+        else:
+            logger.error(f"Kubeconfig file {config_file} does not exist")
+            raise Exception(f"Kubeconfig file {config_file} does not exist")
+
+    # Try loading from the default kubeconfig file
+    try:
+        load_kube_config_file(kube_config, app_config['K8S_CONTEXT'])
+    except Exception as e:
+        logger.info(f"Failed to load context {app_config['K8S_CONTEXT']} from default kubeconfig, trying specific file")
+        specific_kube_config = os.path.expanduser(f"~/.kube/{app_config['K8S_CONTEXT']}.yaml")
+        try:
+            load_kube_config_file(specific_kube_config, app_config['K8S_CONTEXT'])
+        except Exception as e:
+            logger.error(f"Failed to load context {app_config['K8S_CONTEXT']} from specific kubeconfig file {specific_kube_config}: {e}")
+            raise Exception("Could not configure kubernetes python client with any kubeconfig file")
 
     proxy_url = os.getenv('HTTPS_PROXY', os.getenv('HTTP_PROXY', None))
     if proxy_url and not app_config['K8S_PROXY_BYPASS']:
@@ -70,6 +83,35 @@ def get_node_by_instance_id(k8s_nodes, instance_id):
         raise Exception(f"Could not find a k8s node name for instance id {instance_id}")
     return node_name
 
+def is_autoscaler_running():
+    k8s_api = client.AppsV1Api()
+    try:
+        response = k8s_api.read_namespaced_deployment(
+            name=app_config['K8S_AUTOSCALER_DEPLOYMENT'],
+            namespace=app_config['K8S_AUTOSCALER_NAMESPACE']
+        )
+        if response.status.replicas > 0:
+            return True
+        return False
+    except ApiException as e:
+        if e.status == 404:
+            logger.info('K8s autoscaler deployment not found.')
+            return False
+        else:
+            logger.error('Error checking autoscaler status: {}'.format(e))
+            sys.exit(1)
+
+def ensure_connection_to_cluster():
+    try:
+        v1 = client.CoreV1Api()
+        logger.info("Listing namespaces in the cluster:")
+        namespaces = v1.list_namespace(watch=False)
+        for ns in namespaces.items:
+            logger.info(f"Namespace: {ns.metadata.name}")
+        logger.info("Connection to Kubernetes cluster is successful.")
+    except Exception as e:
+        logger.error(f"Failed to connect to Kubernetes cluster: {e}")
+        raise Exception("Connection to Kubernetes cluster failed.")
 
 def modify_k8s_autoscaler(action):
     """
@@ -77,6 +119,13 @@ def modify_k8s_autoscaler(action):
     """
 
     ensure_config_loaded()
+
+    # Option to uncomment this to validate connection to cluster by listing all namespaces in it
+    # ensure_connection_to_cluster()
+
+    if not is_autoscaler_running():
+        logger.info('No k8s autoscaler running.')
+        return
 
     # Configure API key authorization: BearerToken
     # create an instance of the API class

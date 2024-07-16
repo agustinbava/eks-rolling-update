@@ -1,4 +1,5 @@
 import sys
+import json
 import argparse
 import time
 import shutil
@@ -146,7 +147,10 @@ def scale_up_asg(cluster_name, asg, count):
 def update_asgs(asgs, cluster_name):
     run_mode = app_config['RUN_MODE']
     use_asg_termination_policy = app_config['ASG_USE_TERMINATION_POLICY']
+    worker_groups_order = json.loads(app_config['K8S_WORKER_GROUPS_ORDER'])
+    parallel_nodes_count = int(app_config['K8S_PARALLEL_NODES_COUNT'])
 
+    # Get outdated instances
     if run_mode == 4:
         asg_outdated_instance_dict = plan_asgs_older_nodes(asgs)
 
@@ -155,6 +159,7 @@ def update_asgs(asgs, cluster_name):
 
     asg_state_dict = {}
 
+    # Scales up n nodes. n = outdated instances
     if run_mode == 2:
         # Scale up all the ASGs with outdated nodes (by the number of outdated nodes)
         for asg_name, asg_tuple in asg_outdated_instance_dict.items():
@@ -164,6 +169,7 @@ def update_asgs(asgs, cluster_name):
                 f'Setting the scale of ASG {asg_name} based on {outdated_instance_count} outdated instances.')
             asg_state_dict[asg_name] = scale_up_asg(cluster_name, asg, outdated_instance_count)
 
+    # Cordons and/or Taint nodes if required to do so
     k8s_nodes, k8s_excluded_nodes = get_k8s_nodes()
     if (run_mode == 2) or (run_mode == 3):
         for asg_name, asg_tuple in asg_outdated_instance_dict.items():
@@ -182,8 +188,15 @@ def update_asgs(asgs, cluster_name):
                     logger.error(exception)
                     exit(1)
 
+    # Sort ASGs based on worker group order
+    sorted_asg_outdated_instance_dict = {}
+    for group in worker_groups_order:
+        for asg_name, asg_tuple in asg_outdated_instance_dict.items():
+            if group in asg_name:
+                sorted_asg_outdated_instance_dict[asg_name] = asg_tuple
+
     # Drain, Delete and Terminate the outdated nodes and return the ASGs back to their original state
-    for asg_name, asg_tuple in asg_outdated_instance_dict.items():
+    for asg_name, asg_tuple in sorted_asg_outdated_instance_dict.items():
         outdated_instances, asg = asg_tuple
         outdated_instance_count = len(outdated_instances)
 
@@ -278,13 +291,18 @@ def main(args=None):
     run_mode = app_config['RUN_MODE']
     # perform a dry run on mode 4 for older nodes
     if (args.plan or app_config['DRY_RUN']) and (run_mode == 4):
+        logger.info('*** Running DRY RUN! ***')
         plan_asgs_older_nodes(filtered_asgs)
+
     # perform a dry run on main mode
     elif args.plan or app_config['DRY_RUN']:
+        logger.info('*** Running DRY RUN! ***')
         plan_asgs(filtered_asgs)
     else:
         # perform real update
+        logger.info('*** Performing Updates! ***')
         if app_config['K8S_AUTOSCALER_ENABLED']:
+            logger.info('*** Autoscaler enabled ***')
             # pause k8s autoscaler
             modify_k8s_autoscaler("pause")
         try:

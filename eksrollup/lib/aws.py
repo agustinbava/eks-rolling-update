@@ -27,9 +27,15 @@ def get_asgs(cluster_tag, asg_names=app_config['ASG_NAMES']):
     page_iterator = paginator.paginate(
         PaginationConfig={'PageSize': 100}
     )
+    # Collect all ASGs
+    # unfiltered_asgs = []
+    # for page in page_iterator:
+    #     unfiltered_asgs.extend(page['AutoScalingGroups'])
+
     asg_query = "AutoScalingGroups[] | [?contains(Tags[?Key==`kubernetes.io/cluster/{}`].Value, `owned`)]".format(cluster_tag)
     # filter for only asgs with kube cluster tags
     filtered_asgs = page_iterator.search(asg_query)
+    # filtered_asgs_list = list(filtered_asgs)
     if asg_names:
         # select only asgs provided in asg_names
         specific_asgs = []
@@ -350,6 +356,7 @@ def plan_asgs(asgs):
         asg_lc_name = ""
         asg_lt_name = ""
         asg_lt_version = ""
+        
         if 'LaunchConfigurationName' in asg:
             launch_type = "LaunchConfiguration"
             asg_lc_name = asg['LaunchConfigurationName']
@@ -359,10 +366,8 @@ def plan_asgs(asgs):
             asg_lt_version = asg['LaunchTemplate']['Version']
         elif 'MixedInstancesPolicy' in asg:
             launch_type = "LaunchTemplate"
-            asg_lt_name = asg['MixedInstancesPolicy']['LaunchTemplate']['LaunchTemplateSpecification'][
-                'LaunchTemplateName']
-            asg_lt_version = asg['MixedInstancesPolicy']['LaunchTemplate']['LaunchTemplateSpecification'][
-                'Version']
+            asg_lt_name = asg['MixedInstancesPolicy']['LaunchTemplate']['LaunchTemplateSpecification']['LaunchTemplateName']
+            asg_lt_version = asg['MixedInstancesPolicy']['LaunchTemplate']['LaunchTemplateSpecification']['Version']
         else:
             logger.error(f"Auto Scaling Group {asg_name} doesn't have LaunchConfigurationName or LaunchTemplate")
 
@@ -376,12 +381,11 @@ def plan_asgs(asgs):
             elif launch_type == "LaunchTemplate":
                 if instance_outdated_launchtemplate(instance, asg_lt_name, asg_lt_version):
                     outdated_instances.append(instance)
-        logger.info('Found {} outdated instances'.format(
-            len(outdated_instances))
-        )
+        logger.info('Found {} outdated instances'.format(len(outdated_instances)))
         asg_outdated_instance_dict[asg_name] = outdated_instances, asg
 
     return asg_outdated_instance_dict
+
 
 
 def plan_asgs_older_nodes(asgs):
