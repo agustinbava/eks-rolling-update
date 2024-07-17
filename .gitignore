@@ -10,3 +10,7 @@ venv
 build/
 dist/
 *.egg-info/
+*describe-all-auto-scaling-groups.json
+*describe-staginguse1-asgs.json
+*dry-run-output.log
+*testing_variables.txt

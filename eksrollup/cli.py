@@ -233,20 +233,23 @@ def update_asgs(asgs, cluster_name):
 
         # start draining and terminating
         desired_asg_capacity = asg_state_dict[asg_name][0]
+
+        running_updates = 0
         for outdated in outdated_instances:
-            # catch any failures so we can resume aws autoscaling
+            while running_updates >= parallel_nodes_count:
+                time.sleep(10)
+            # Catch any failures so we can resume aws autoscaling
             try:
-                # get the k8s node name instead of instance id
                 node_name = get_node_by_instance_id(k8s_nodes, outdated['InstanceId'])
                 desired_asg_capacity -= 1
                 drain_node(node_name)
                 delete_node(node_name)
                 save_asg_tags(asg_name, app_config["ASG_DESIRED_STATE_TAG"], desired_asg_capacity)
-                # terminate/detach outdated instances only if ASG termination policy is ignored
+
+                # Terminate/detach outdated instances only if ASG termination policy is ignored
                 if not use_asg_termination_policy:
                     terminate_instance_in_asg(outdated['InstanceId'])
-                    if not instance_terminated(outdated['InstanceId']):
-                        raise Exception('Instance is failing to terminate. Cancelling out.')
+                    running_updates += 1
 
                     between_nodes_wait = app_config['BETWEEN_NODES_WAIT']
                     if between_nodes_wait != 0:
