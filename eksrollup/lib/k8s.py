@@ -1,8 +1,9 @@
-from kubernetes import client, config
+from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 from kubernetes.config.config_exception import ConfigException
 import os
 import subprocess
+import json
 import time
 import sys
 from .logger import logger
@@ -23,7 +24,7 @@ def ensure_config_loaded():
                 logger.warning(f"Could not configure kubernetes python client with the specified context {context} from {config_file}: {e}")
                 raise Exception("Could not configure kubernetes python client with the specified context")
         else:
-            logger.error(f"Kubeconfig file {config_file} does not exist")
+            logger.warning(f"Kubeconfig file {config_file} does not exist")
             raise Exception(f"Kubeconfig file {config_file} does not exist")
 
     # Try loading from the default kubeconfig file
@@ -67,21 +68,56 @@ def get_k8s_nodes(exclude_node_label_keys=app_config["EXCLUDE_NODE_LABEL_KEYS"])
     return nodes, excluded_nodes
 
 
-def get_node_by_instance_id(k8s_nodes, instance_id):
+def get_node_by_instance_id(k8s_nodes, instance_id, retries=3, delay=5):
     """
     Returns a K8S node name given an instance id. Expects the output of
-    list_nodes as in input
+    list_nodes as an input. Retries if the node is not found.
     """
+    attempt = 0
     node_name = ""
-    logger.info('Searching for k8s node name by instance id...')
-    for k8s_node in k8s_nodes:
-        if instance_id in k8s_node.spec.provider_id:
-            logger.info('InstanceId {} is node {} in kubernetes land'.format(instance_id, k8s_node.metadata.name))
-            node_name = k8s_node.metadata.name
-    if not node_name:
-        logger.info(f"Could not find a k8s node name for instance id {instance_id}")
-        raise Exception(f"Could not find a k8s node name for instance id {instance_id}")
-    return node_name
+
+    while attempt < retries:
+        logger.info('Searching for k8s node name by instance id... Attempt {}'.format(attempt + 1))
+        logger.info(f"Instance ID: {instance_id}")
+        logger.info(f"K8s Nodes List Length: {len(k8s_nodes)}")
+
+        # Print the structure of k8s_nodes for debugging
+        # for index, k8s_node in enumerate(k8s_nodes):
+        #     logger.info(f"Node {index} Type: {type(k8s_node)}")
+
+        for k8s_node in k8s_nodes:
+            if isinstance(k8s_node, dict):
+                logger.error(f"Unexpected dict structure in k8s_nodes: {k8s_node}")
+                continue
+            if isinstance(k8s_node, list):
+                logger.error(f"Unexpected list structure in k8s_nodes: {k8s_node}")
+                continue
+            try:
+                # logger.info(f"Checking node: {k8s_node.metadata.name} with provider ID: {k8s_node.spec.provider_id}")
+                if instance_id in k8s_node.spec.provider_id:
+                    logger.info('InstanceId {} is node {} in kubernetes land'.format(instance_id, k8s_node.metadata.name))
+                    node_name = k8s_node.metadata.name
+                    break
+            except AttributeError as e:
+                logger.error(f"AttributeError: {e}")
+                # logger.error(f"Node Data: {json.dumps(k8s_node.to_dict(), default=str)}")
+            except Exception as e:
+                logger.error(f"Unexpected error: {e}")
+                # logger.error(f"Node Data: {json.dumps(k8s_node.to_dict(), default=str)}")
+
+        if node_name:
+            return node_name
+
+        logger.warning(f"Could not find a k8s node name for instance id {instance_id} on attempt {attempt + 1}")
+        logger.warning(f"Instance: {instance_id}, k8s_nodes: {[node.spec.provider_id for node in k8s_nodes]}")
+
+        attempt += 1
+        if attempt < retries:
+            time.sleep(delay)
+            k8s_nodes = get_k8s_nodes()  # Refresh the k8s_nodes list
+
+    raise Exception(f"Could not find a k8s node name for instance id {instance_id} after {retries} attempts")
+
 
 def is_autoscaler_running():
     k8s_api = client.AppsV1Api()
@@ -215,36 +251,40 @@ def taint_node(node_name):
 
 def drain_node(node_name):
     """
-    Executes kubectl commands to drain the node. We are not using the api
-    because the draining functionality is done client side and to
-    replicate the same functionality here would be too time consuming
+    Drains the specified node using the Kubernetes API.
     """
-    kubectl_args = [
-        'kubectl', 'drain', node_name,
-        '--ignore-daemonsets',
-        '--delete-emptydir-data'
-    ]
-    kubectl_args += app_config['EXTRA_DRAIN_ARGS']
+    # Ensure the Kubernetes configuration is loaded
+    try:
+        config.load_kube_config()
+    except config.ConfigException:
+        config.load_incluster_config()
 
-    if app_config['DRY_RUN'] is True:
-        kubectl_args += ['--dry-run']
+    v1 = client.CoreV1Api()
 
-    logger.info('Draining worker node with {}...'.format(' '.join(kubectl_args)))
-    result = subprocess.run(kubectl_args)
+    # Evict pods from the node
+    try:
+        logger.info(f"Draining node {node_name}...")
+        pods = v1.list_pod_for_all_namespaces(watch=False, field_selector=f"spec.nodeName={node_name}")
+        for pod in pods.items:
+            if pod.metadata.owner_references and any(owner.kind == "DaemonSet" for owner in pod.metadata.owner_references):
+                logger.info(f"Skipping DaemonSet pod {pod.metadata.name} in namespace {pod.metadata.namespace}")
+                continue
+            eviction = client.V1beta1Eviction(
+                metadata=client.V1ObjectMeta(name=pod.metadata.name, namespace=pod.metadata.namespace),
+                delete_options=client.V1DeleteOptions(grace_period_seconds=0)
+            )
+            try:
+                v1.create_namespaced_pod_eviction(name=pod.metadata.name, namespace=pod.metadata.namespace, body=eviction)
+                logger.info(f"Evicted pod {pod.metadata.name} from namespace {pod.metadata.namespace}")
+            except ApiException as e:
+                logger.error(f"Failed to evict pod {pod.metadata.name} from namespace {pod.metadata.namespace}: {e}")
+                raise Exception(f"Failed to evict pod {pod.metadata.name} from namespace {pod.metadata.namespace}: {e}")
 
-    # If returncode is non-zero run enforced draining of the node or raise a CalledProcessError.
-    if result.returncode != 0:
-        if app_config['ENFORCED_DRAINING'] is True:
-            kubectl_args += [
-                '--disable-eviction=true',
-                '--force=true'
-            ]
-            logger.info('There was an error draining the worker node, proceed with enforced draining ({})...'.format(' '.join(kubectl_args)))
-            enforced_result = subprocess.run(kubectl_args)
-            if enforced_result.returncode != 0:
-                raise Exception("Node not drained properly with enforced draining enabled. Exiting")
-        else:
-            raise Exception("Node not drained properly. Exiting")
+    except ApiException as e:
+        logger.error(f"Failed to drain node {node_name}: {e}")
+        raise Exception(f"Failed to drain node {node_name}")
+
+
 
 
 def k8s_nodes_ready(max_retry=app_config['GLOBAL_MAX_RETRY'], wait=app_config['GLOBAL_HEALTH_WAIT']):

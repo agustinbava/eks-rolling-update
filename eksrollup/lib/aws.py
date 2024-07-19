@@ -55,9 +55,9 @@ def get_launch_template(lt_name):
     return response['LaunchTemplates'][0]
 
 
-def terminate_instance_in_asg(instance_id):
+def terminate_instance_in_asg(instance_id, timeout=300):
     """
-    Terminates EC2 instance given an instance ID
+    Terminates EC2 instance given an instance ID with a timeout check.
     """
     if not app_config['DRY_RUN']:
         logger.info('Terminating ec2 instance in ASG {}...'.format(instance_id))
@@ -68,6 +68,15 @@ def terminate_instance_in_asg(instance_id):
             )
             if response['ResponseMetadata']['HTTPStatusCode'] == requests.codes.ok:
                 logger.info('Termination signal for instance is successfully sent.')
+                # Wait for the instance to terminate
+                start_time = time.time()
+                while (time.time() - start_time) < timeout:
+                    if instance_terminated(instance_id):
+                        logger.info('Instance {} has been terminated.'.format(instance_id))
+                        return True
+                    time.sleep(10)
+                logger.warning('Instance {} termination timed out.'.format(instance_id))
+                return False
             else:
                 logger.info('Termination signal for instance has failed. Response code was {}. Exiting.'.format(response['ResponseMetadata']['HTTPStatusCode']))
                 raise Exception('Termination of instance failed. Response code was {}. Exiting.'.format(response['ResponseMetadata']['HTTPStatusCode']))
@@ -75,6 +84,7 @@ def terminate_instance_in_asg(instance_id):
         except client.exceptions.ClientError as e:
             if 'DryRunOperation' not in str(e):
                 raise
+    return False
 
 
 def is_asg_healthy(asg_name, max_retry=app_config['GLOBAL_MAX_RETRY'], wait=app_config['GLOBAL_HEALTH_WAIT']):
@@ -115,13 +125,20 @@ def is_asg_scaled(asg_name, desired_capacity):
         AutoScalingGroupNames=[asg_name], MaxRecords=1
     )
     actual_instances = response['AutoScalingGroups'][0]['Instances']
-    if len(actual_instances) != desired_capacity:
+    if len(actual_instances) < desired_capacity:
         logger.info('Asg {} does not have the correct number of running instances to proceed'.format(asg_name))
         logger.info('Actual instances: {} Desired instances: {}'.format(
             len(actual_instances),
             desired_capacity)
         )
         is_scaled = False
+    elif len(actual_instances) > desired_capacity:
+        logger.info('Asg {} does not have the desired capacity. It has more than that.'.format(asg_name))
+        logger.info('Actual instances: {} Desired instances: {}'.format(
+            len(actual_instances),
+            desired_capacity)
+        )
+        is_scaled = True
     else:
         logger.info('Asg {} scaled OK'.format(asg_name))
         logger.info('Actual instances: {} Desired instances: {}'.format(
