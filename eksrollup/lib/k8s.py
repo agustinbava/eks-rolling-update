@@ -56,15 +56,18 @@ def get_k8s_nodes(exclude_node_label_keys=app_config["EXCLUDE_NODE_LABEL_KEYS"])
     response = k8s_api.list_node()
     nodes = []
     excluded_nodes = []
+    excluded_nodes_names = []
     if exclude_node_label_keys is not None:
         for node in response.items:
             if all(key not in node.metadata.labels for key in exclude_node_label_keys):
                 nodes.append(node)
             else:
                 excluded_nodes.append(node)
+                excluded_nodes_names.append(node.metadata.name)
     else:
         nodes=response.items
     logger.info("Current total k8s node count is %d (included: %d, excluded: %d)", len(nodes)+len(excluded_nodes), len(nodes), len(excluded_nodes))
+    logger.info("Excluded nodes: %s ", str(excluded_nodes_names))
     return nodes, excluded_nodes
 
 
