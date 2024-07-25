@@ -166,14 +166,16 @@ def update_asgs(asgs, cluster_name):
         for asg_name, asg_tuple in asg_outdated_instance_dict.items():
             outdated_instances, asg = asg_tuple
             outdated_instance_count = len(outdated_instances)
-            logger.info(
-                f'Setting the scale of ASG {asg_name} based on {outdated_instance_count} outdated instances.')
+            logger.info(f'Setting the scale of ASG {asg_name} based on {outdated_instance_count} outdated instances.')
             asg_state_dict[asg_name] = scale_up_asg(cluster_name, asg, outdated_instance_count)
 
     # Cordons and/or Taint nodes if required to do so
     k8s_nodes, k8s_excluded_nodes = get_k8s_nodes()
-    if (run_mode == 2) or (run_mode == 3):
+    if run_mode in [2, 3]:
         for asg_name, asg_tuple in asg_outdated_instance_dict.items():
+            if not any(group in asg_name for group in worker_groups_order):
+                logger.info(f"Skipping ASG {asg_name} as it is not in the worker group order.")
+                continue
             outdated_instances, asg = asg_tuple
             for outdated in outdated_instances:
                 node_name = ""
@@ -236,14 +238,14 @@ def update_asgs(asgs, cluster_name):
                         logger.error(exception)
                         exit(1)
 
-        if len(outdated_instances) != 0:
+        if outdated_instances:
             if not use_asg_termination_policy:
                 modify_aws_autoscaling(asg_name, "suspend")
 
-        # start draining and terminating
+        # Start draining and terminating
         desired_asg_capacity = asg_state_dict[asg_name][0]
-
         running_updates = 0
+
         for outdated in outdated_instances:
             while running_updates >= parallel_nodes_count:
                 time.sleep(10)
@@ -266,7 +268,7 @@ def update_asgs(asgs, cluster_name):
                     running_updates += 1
 
                     between_nodes_wait = app_config['BETWEEN_NODES_WAIT']
-                    if between_nodes_wait != 0:
+                    if between_nodes_wait:
                         logger.info(f'Waiting for {between_nodes_wait} seconds before continuing...')
                         time.sleep(between_nodes_wait)
             except Exception as drain_exception:
@@ -281,7 +283,7 @@ def update_asgs(asgs, cluster_name):
                 except:
                     raise RollingUpdateException("Rolling update on ASG failed", asg_name)
 
-        # scaling cluster back down
+        # Scaling cluster back down
         logger.info("Scaling asg back down to original state")
         asg_desired_capacity, asg_orig_desired_capacity, asg_orig_max_capacity = asg_state_dict[asg_name]
         scale_asg(asg_name, asg_desired_capacity, asg_orig_desired_capacity, asg_orig_max_capacity)

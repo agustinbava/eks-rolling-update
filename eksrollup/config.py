@@ -28,7 +28,7 @@ app_config = {
     'GLOBAL_HEALTH_WAIT': int(os.getenv('GLOBAL_HEALTH_WAIT', 20)),
     'BETWEEN_NODES_WAIT': int(os.getenv('BETWEEN_NODES_WAIT', 0)),
     'RUN_MODE': int(os.getenv('RUN_MODE', 1)),
-    'DRY_RUN': str_to_bool(os.getenv('DRY_RUN', False)),
+    'DRY_RUN': str_to_bool(os.getenv('DRY_RUN', True)),
     # 'EXCLUDE_NODE_LABEL_KEYS': os.getenv('EXCLUDE_NODE_LABEL_KEYS', 'spotinst.io/node-lifecycle').split(),
     'EXCLUDE_NODE_LABEL_KEYS': os.getenv('EXCLUDE_NODE_LABEL_KEYS', 'ara.app/tier').split(),
     'EXTRA_DRAIN_ARGS': os.getenv('EXTRA_DRAIN_ARGS', '').split(),
